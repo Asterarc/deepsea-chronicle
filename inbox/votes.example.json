@@ -1,0 +1,7 @@
+{
+  "votes": [
+    { "nickname": "演示居民小满", "side": "A", "likes": 24 },
+    { "nickname": "演示居民泡泡", "side": "B", "likes": 18 },
+    { "nickname": "演示居民阿蓝", "side": "A", "likes": 7 }
+  ]
+}

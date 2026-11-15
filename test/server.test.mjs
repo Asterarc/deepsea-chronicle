@@ -1,0 +1,63 @@
+import { test } from 'node:test';
+import { strict as assert } from 'node:assert';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+
+test('HTTP 完整流程：保存世界、拒绝无效操作、纪事和审核', async t => {
+  const temp = await mkdtemp(path.join(os.tmpdir(), 'deepsea-http-'));
+  process.env.DEEPSEA_DATA_DIR = temp;
+  const { startServer } = await import('../server.mjs');
+  const server = await startServer(0);
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  async function call(route, payload, headers = {}) {
+    const response = await fetch(base + route, payload === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(payload) });
+    return { status: response.status, data: await response.json() };
+  }
+
+  const initial = await call('/api/world');
+  assert.equal(initial.status, 200);
+  assert.equal(initial.data.residents.length, 96);
+  const initialDay = initial.data.day;
+  const initialBytes = await readFile(path.join(temp, 'world.json'), 'utf8');
+  const badTick = await call('/api/tick', { days: -1 });
+  assert.equal(badTick.status, 400);
+  assert.equal(await readFile(path.join(temp, 'world.json'), 'utf8'), initialBytes);
+  const badOrigin = await call('/api/tick', { days: 1 }, { Origin: 'http://another.example' });
+  assert.equal(badOrigin.status, 403);
+  const next = await call('/api/tick', { days: 1 });
+  assert.equal(next.data.world.day, initialDay + 1);
+  assert.equal(JSON.parse(await readFile(path.join(temp, 'world.json'), 'utf8')).day, initialDay + 1);
+  const adopted = await call('/api/adopt', { name: 'HTTP测试鱼' });
+  assert.equal(adopted.status, 201);
+  assert.equal(adopted.data.world.residents.length, 97);
+  const invalidEvent = await call('/api/event', { type: '随意事件' });
+  assert.equal(invalidEvent.status, 400);
+  assert.equal((await call('/api/event', { type: '觅食' })).status, 200);
+  const selected = await call('/api/episode');
+  assert.equal(selected.status, 200);
+  assert.equal(selected.data.episode.protagonists.length, 3);
+  assert.equal(selected.data.episode.review.approved, false);
+  assert.equal((await call('/api/render', { duration: 15 })).status, 400);
+  assert.equal((await call('/api/votes', { votes: [{ nickname: '测试居民', side: 'A', likes: -2 }] })).status, 400);
+  const voted = await call('/api/votes', { votes: [{ nickname: '测试居民', side: 'A', likes: 9 }, { nickname: '另一位', side: 'B', likes: 3 }] });
+  assert.equal(voted.status, 200);
+  assert.equal(voted.data.episode.vote.source, 'imported');
+  const version = { episodeId: voted.data.episode.id, worldRevision: voted.data.episode.worldRevision };
+  assert.equal((await call('/api/episode/review', { ...version, checks: [true] })).status, 400);
+  const reviewed = await call('/api/episode/review', { ...version, checks: [true, true, true, true, true] });
+  assert.equal(reviewed.status, 200);
+  assert.equal(reviewed.data.episode.review.approved, true);
+  await call('/api/event', { type: '入睡' });
+  assert.equal((await call('/api/episode/review', { ...version, checks: [true, true, true, true, true] })).status, 409);
+  assert.equal((await call('/api/episode')).data.episode.review.approved, false);
+  const files = await call('/api/files');
+  assert.ok(files.data.files.some(item => item.name.endsWith('.md')));
+  assert.equal((await call('/api/absent')).status, 404);
+  const downloaded = await fetch(base + '/api/world/download');
+  assert.equal(downloaded.status, 200);
+  assert.ok(downloaded.headers.get('content-disposition').includes('world.json'));
+  const forbidden = await fetch(base + '/out/..%5cworld.json');
+  assert.equal(forbidden.status, 404);
+});
